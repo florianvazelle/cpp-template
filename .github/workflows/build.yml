@@ -1,0 +1,176 @@
+name: build
+
+on: [push, pull_request]
+
+jobs:
+
+  linux:
+    timeout-minutes: 10
+
+    strategy:
+      matrix:
+        compiler: [
+            g++-7, g++-8, g++-9, g++,
+            clang++-8, clang++-9, clang++
+        ]
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Install g++-7
+      if: ${{ matrix.compiler == 'g++-7' }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install g++-7 -y
+    
+    - name: Install g++-8
+      if: ${{ matrix.compiler == 'g++-8' }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install g++-8 -y
+
+    - name: Install clang-8
+      if: ${{ matrix.compiler == 'clang++-8' }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install clang-8 -y
+    
+    - name: Setup Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.6
+
+    - name: Install Conan
+      run: pip install --upgrade pip setuptools wheel conan
+
+    - name: Create Build Environment
+      # Some projects don't allow in-source building, so create a separate build directory
+      # We'll use this as our working directory for all subsequent commands
+      run: cmake -E make_directory ${{ runner.workspace }}/build ${{ runner.workspace }}/instdir
+
+    - name: Configure CMake
+      # Use a bash shell so we can use the same syntax for environment variable
+      # access regardless of the host operating system
+      shell: bash
+      working-directory: ${{runner.workspace}}/build
+      env:
+        CXX: ${{ matrix.compiler }}
+      # Note the current convention is to use the -S and -B options here to specify source 
+      # and build directories, but this is only available with CMake 3.13 and higher.  
+      # The CMake binaries on the Github Actions machines are (as of this writing) 3.12
+      run: |
+        cmake \
+          $GITHUB_WORKSPACE \
+          -DGREETER_BUILD_TESTING=ON -DGREETER_BUILD_APP=ON -DGREETER_INSTALL_APP=ON \
+          -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/instdir"
+
+    - name: Build
+      working-directory: ${{ runner.workspace }}/build
+      shell: bash
+      # Execute the build.  You can specify a specific target with "--target <NAME>"
+      run: cmake --build . --config Debug
+
+    - name: Run tests
+      working-directory: ${{ runner.workspace }}/build
+      env:
+        CTEST_OUTPUT_ON_FAILURE: 1
+      # Execute tests defined by the CMake configuration.  
+      # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
+      run: ctest --timeout 10 -C Debug -j4
+
+    - name: Install Strip
+      working-directory: ${{ runner.workspace }}/build
+      shell: bash
+      run: cmake --install . --strip
+
+    - name: Upload
+      uses: actions/upload-artifact@v1
+      with:
+        path: ${{ runner.workspace }}/instdir
+        name: ubuntu-${{ matrix.compiler }}
+
+  windows:
+    timeout-minutes: 10
+
+    strategy:
+      matrix:
+        os: [windows-latest, windows-2016]
+        toolset: [clang-cl, default, v141]
+        include:
+          - toolset: clang-cl
+            toolset_option: -T"ClangCl"
+          - toolset: v141
+            toolset_option: -T"v141"
+        exclude:
+          - os: windows-2016
+            toolset: clang-cl
+          - os: windows-2016
+            toolset: v141
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Install Conan
+      run: |
+        python -c "import sys; print(sys.version)"
+        python -m pip install --upgrade pip
+        pip install conan
+
+    - name: Create Build Environment
+      run: cmake -E make_directory ${{ runner.workspace }}/build ${{ runner.workspace }}/instdir
+
+    - name: Configure CMake
+      shell: bash
+      working-directory: ${{runner.workspace}}/build
+      env:
+        CXX: ${{ matrix.compiler }}
+      run: |
+        cmake \
+          $GITHUB_WORKSPACE \
+          -DGREETER_BUILD_TESTING=ON -DGREETER_BUILD_APP=ON -DGREETER_INSTALL_APP=ON \
+          -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/instdir"
+
+    - name: Build
+      working-directory: ${{ runner.workspace }}/build
+      shell: bash
+      run: cmake --build . --config Debug
+
+    - name: Run tests
+      working-directory: ${{ runner.workspace }}/build
+      env:
+        CTEST_OUTPUT_ON_FAILURE: 1
+      run: ctest --timeout 10 -C Debug -j4
+
+    - name: Install Strip
+      working-directory: ${{ runner.workspace }}/build
+      shell: bash
+      run: cmake --install . --strip
+
+    - name: Upload
+      uses: actions/upload-artifact@v1
+      with:
+        path: ${{ runner.workspace }}/instdir
+        name: ${{ matrix.os }}-${{ matrix.toolset }}
+
+  docs:
+    name: Publish documentation
+    runs-on: macos-latest
+    needs: [linux, windows]
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: actions/download-artifact@master
+        with:
+          name: ubuntu-g++
+          path: ${{ runner.workspace }}/instdir
+
+      - name: Publish
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ${{ runner.workspace }}/instdir/docs/doxygen/html
